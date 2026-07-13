@@ -347,7 +347,7 @@ def get_reddit_post(submission):
                 [reply_table_headers, reply_table_divider, reply_table_values])
             print(reply_table)
 
-            text_reply = f"👋🏾 Hello, LuxeLife Bot here! These are the results of your post. If these results do not look correct, please [update your submission via this form]({prefill}). \n\n *Please contact u/JeenyusJane if you encounter problems with this bot.* \n\n \n"+reply_table
+            text_reply = f"👋🏾 Hello, LuxeLife Bot here! This is a summary of your post. If this info looks incorrect or missing anything, please [update your submission via this form]({prefill}). \n\n *Please send mod mail if you encounter problems with this bot.* \n\n \n"+reply_table
 
             # Reply to Submission
             pp.pprint(submission.url)
