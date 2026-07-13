@@ -609,7 +609,7 @@ if LOOKBACK_DAYS:
     print("Starting backfill...")
 
     # Backfill recent posts instead of waiting on the live stream
-    for submission in subreddit.new(limit=500):
+    for submission in subreddit.new(limit=50):
         if submission.created_utc <= max_utc:
             break
         process_submission(submission)
