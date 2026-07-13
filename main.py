@@ -69,11 +69,7 @@ imgur_api.headers.update(
 )
 
 imgur_cdn = requests.Session()
-imgur_cdn.headers.update(
-    {
-        "User-Agent": "Mozilla/5.0",
-    }
-)
+imgur_cdn.headers.update({"User-Agent": IMGUR_USER_AGENT})
 
 
 ######################################################
