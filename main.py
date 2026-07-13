@@ -2,7 +2,7 @@
 import praw  # Mananage the Reddit API
 # Handle exceptions from the Reddit API
 from prawcore.exceptions import PrawcoreException
-from pyairtable import Base  # Manage the Airtable API
+from pyairtable import Api  # Manage the Airtable API
 from datetime import date  # Manage Dates
 import os
 import re
@@ -22,15 +22,28 @@ load_dotenv()
 REDDIT_CLIENT_ID = os.environ.get('REDDIT_CLIENT_ID')
 REDDIT_CLIENT_SECRET = os.environ.get('REDDIT_CLIENT_SECRET')
 REDDIT_PASSWORD = os.environ.get('REDDIT_PASSWORD')
+REDDIT_USERNAME = os.environ.get('REDDIT_USERNAME')
+REDDIT_USER_AGENT = os.environ.get('REDDIT_USER_AGENT')
 
 AIRTABLE_API_KEY = os.environ.get('AIRTABLE_API_KEY')
 AIRTABLE_BASE_ID = os.environ.get('AIRTABLE_BASE_ID')
+AIRTABLE_REVIEWS_TABLE = os.environ.get('AIRTABLE_REVIEWS_TABLE')
+
+IMGUR_CLIENT_ID = os.environ.get('IMGUR_CLIENT_ID')
+IMGUR_CLIENT_SECRET = os.environ.get('IMGUR_CLIENT_SECRET')
 
 # Load Airtable and Get Max UTC
 print('\nInitializing Airtable Client... \n')
-base = Base(AIRTABLE_API_KEY, AIRTABLE_BASE_ID)
-reviews_table = base.all('REVIEWS', fields='created_utc')
-df = pd.DataFrame(reviews_table)
+api = Api(AIRTABLE_API_KEY)
+base = api.base(AIRTABLE_BASE_ID)
+reviews_table = base.table(AIRTABLE_REVIEWS_TABLE)
+brands_table = base.table('BRANDS')
+sellers_table = base.table('SELLERS')
+factories_table = base.table('FACTORIES')
+styles_table = base.table('STYLES')
+
+reviews_records = reviews_table.all(fields=['created_utc'])
+df = pd.DataFrame(reviews_records)
 reviews_df = pd.json_normalize(df.fields)
 utcs = reviews_df['created_utc'].to_list()
 max_utc = max(utcs)
@@ -45,8 +58,8 @@ def load_reddit():
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
         password=REDDIT_PASSWORD,
-        user_agent="testscript by u/JeenyusJane",
-        username="luxe_life_bot",
+        user_agent=REDDIT_USER_AGENT,
+        username=REDDIT_USERNAME,
     )
     global subreddit
     subreddit = reddit.subreddit('luxelife')
@@ -59,26 +72,26 @@ load_reddit()
 
 def load_cardinal_objects():
     # Load Brand Names
-    brands_table = base.all('BRANDS')
-    df = pd.DataFrame(brands_table)
+    brands_records = brands_table.all()
+    df = pd.DataFrame(brands_records)
     brand_df = pd.json_normalize(df.fields)
     brands_and_aliases = brand_df['Name & Aliases'].to_list()
 
     # Load Seller Names
-    sellers_table = base.all('SELLERS')
-    df = pd.DataFrame(sellers_table)
+    sellers_records = sellers_table.all()
+    df = pd.DataFrame(sellers_records)
     seller_df = pd.json_normalize(df.fields)
     sellers_and_aliases = seller_df['Name & Aliases'].to_list()
 
     # Load Factory Names
-    factory_table = base.all('FACTORIES')
-    df = pd.DataFrame(factory_table)
+    factories_records = factories_table.all()
+    df = pd.DataFrame(factories_records)
     factory_df = pd.json_normalize(df.fields)
     factory_and_aliases = factory_df['Name & Aliases'].to_list()
 
     # Load Style Names
-    style_table = base.all('STYLES')
-    df = pd.DataFrame(style_table)
+    styles_records = styles_table.all()
+    df = pd.DataFrame(styles_records)
     style_df = pd.json_normalize(df.fields)
     styles_and_aliases = style_df['Name & Aliases'].to_list()
 
@@ -229,8 +242,6 @@ def get_reddit_post(submission):
                 new_record[item[0]] = item[1]['id']
 
             # Get All Imgur Links in Post
-            imgurClientId = '38d3368aaca99ca'
-            imgurClientSecret = '989522a01a9364c8b40d80dbc052a89a14fe957b'
             albumRegex = "https:\/\/imgur.com\/\w\/(\w+|\d+)"
             albumMatch = re.search(albumRegex, submission.selftext)
 
@@ -243,8 +254,8 @@ def get_reddit_post(submission):
                 if album_hash:
                     api_url = f'https://api.imgur.com/3/album/{album_hash}/images'
                     headers = {
-                        'Authorization': f'Client-ID {imgurClientId}',
-                        'User-Agent': "JeenyusJane - LuxLife Review Bot 1.0"
+                        'Authorization': f'Client-ID {IMGUR_CLIENT_ID}',
+                        'User-Agent': REDDIT_USER_AGENT,
                     }
                     request = requests.get(api_url, headers=headers)
                     if request:
@@ -257,7 +268,7 @@ def get_reddit_post(submission):
                         new_record['attachment'] = attachments[0:5]
 
             # Create New Records in Airtable
-            record = base.create('REVIEWS', new_record, typecast=True)
+            record = reviews_table.create(new_record, typecast=True)
             record_id = record['id']
 
             # Create Reply Text and Table
