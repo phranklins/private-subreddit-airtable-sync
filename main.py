@@ -19,7 +19,7 @@ import mimetypes
 # for debugging
 import traceback
 
-from urllib.parse import urlparse
+from urllib.parse import urlparse, quote_plus
 
 # from operator import indexOf
 from dotenv import load_dotenv
@@ -304,6 +304,8 @@ def match_cardinal_objects(
 
 
 def parse_review_body(post_body):
+    # Guard against None
+    post_body = post_body or ""
 
     # Convert body to lowercase to make regex matching easier
     lower_body = post_body.lower()
@@ -318,12 +320,20 @@ def parse_review_body(post_body):
             continue
 
         if "extract" in config:
-            regex_data[field] = match.group(2)
-
+            raw_value = match.group(2) if match.groups() and len(match.groups()) >= 2 else match.group(1)
+            # If this field is a score, normalize to a float and clamp to 10
             if "score" in config:
-                # Future score validation goes here
-                pass
-
+                try:
+                    normalized = str(raw_value).replace(",", ".").strip()
+                    num = float(normalized)
+                    if num > 10:
+                        num = 10.0
+                    regex_data[field] = num
+                except (ValueError, TypeError):
+                    # Fall back to the raw string if conversion fails
+                    regex_data[field] = raw_value
+            else:
+                regex_data[field] = raw_value
         else:
             regex_data[field] = match.group(0)
 
@@ -435,25 +445,25 @@ def build_airtable_record(submission, regex_data, title_data):
 
 def build_prefill_link(reply_sharelink, record_id):
 
-    # URL ENCODE !
+    # Base prefill
     prefill = "https://airtable.com/shrgaB9P7ktxOgdJJ"
-
     first = True
 
     for item, value in reply_sharelink.items():
-
         if value is None:
             continue
 
         separator = "?" if first else "&"
 
-        encoded = ",".join(value) if isinstance(value, list) else value
+        # If value is a list, join with commas; otherwise stringify
+        encoded = ",".join(value) if isinstance(value, list) else str(value)
+        # URL-encode the parameter value
+        safe = quote_plus(encoded)
 
-        prefill += f"{separator}prefill_{item}={encoded}"
-
+        prefill += f"{separator}prefill_{item}={safe}"
         first = False
 
-    prefill += f"&prefill_Review={record_id}"
+    prefill += f"&prefill_Review={quote_plus(str(record_id))}"
 
     return prefill
 
