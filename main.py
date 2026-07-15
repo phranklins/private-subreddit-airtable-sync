@@ -146,15 +146,32 @@ sellers_table = base.table("SELLERS")
 factories_table = base.table("FACTORIES")
 styles_table = base.table("STYLES")
 
+# Calculate max_utc based on LOOKBACK_DAYS and existing records
+print("Calculating max_utc threshold...\n")
+
+# Get the maximum created_utc from existing Airtable records
+reviews_records = reviews_table.all(fields=["created_utc"])
+df = pd.DataFrame(reviews_records)
+reviews_df = pd.json_normalize(df.fields)
+utcs = reviews_df["created_utc"].to_list()
+max_utc_from_records = max(utcs) if utcs else 0
+
 if LOOKBACK_DAYS:
-    max_utc = time.time() - (LOOKBACK_DAYS * 24 * 60 * 60)
-    print(f"Using {LOOKBACK_DAYS}-day lookback (max_utc={max_utc})\n")
+    # Calculate timestamp based on LOOKBACK_DAYS
+    lookback_utc = time.time() - (LOOKBACK_DAYS * 24 * 60 * 60)
+    
+    # Use the more recent of the two thresholds
+    # If max_utc_from_records exists and is more recent than lookback, use it
+    # Otherwise, use lookback_utc
+    if max_utc_from_records > 0 and max_utc_from_records > lookback_utc:
+        max_utc = max_utc_from_records
+        print(f"Using max record UTC ({max_utc}) - more recent than {LOOKBACK_DAYS}-day lookback\n")
+    else:
+        max_utc = lookback_utc
+        print(f"Using {LOOKBACK_DAYS}-day lookback (max_utc={max_utc})\n")
 else:
-    reviews_records = reviews_table.all(fields=["created_utc"])
-    df = pd.DataFrame(reviews_records)
-    reviews_df = pd.json_normalize(df.fields)
-    utcs = reviews_df["created_utc"].to_list()
-    max_utc = max(utcs) if utcs else 0
+    # No LOOKBACK_DAYS: use the max from existing records
+    max_utc = max_utc_from_records
     print(f"Using last Airtable review (max_utc={max_utc})\n")
 
 print(
@@ -545,12 +562,29 @@ def build_reply_table(reply_table):
     )
 
 
+### CHECK IF RECORD ALREADY EXISTS ###
+
+
+def record_exists(submission_id):
+    """Check if a post with the given submission ID already exists in Airtable."""
+    try:
+        existing = reviews_table.all(formula=f"{{id}}='{submission_id}'")
+        return len(existing) > 0
+    except Exception as e:
+        print(f"Error checking for existing record {submission_id}: {e}")
+        return False
+
 ### GET NEW POSTS ###
 
 
 def get_reddit_post(submission):
 
     if submission.created_utc <= max_utc:
+        return
+
+    # Check if post already exists in Airtable (deduplication)
+    if record_exists(submission.id):
+        print(f"Post {submission.id} already exists. Skipping...\n")
         return
 
     if not submission.link_flair_text:
