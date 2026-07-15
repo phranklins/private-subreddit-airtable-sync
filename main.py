@@ -211,24 +211,41 @@ def load_cardinal_objects():
     brands_records = brands_table.all()
     df = pd.DataFrame(brands_records)
     brand_df = pd.json_normalize(df.fields)
+    if "Name & Aliases" in brand_df.columns:
+        brand_df["Name & Aliases"] = brand_df["Name & Aliases"].fillna("")
+    else:
+        brand_df["Name & Aliases"] = ""
+
     brands_and_aliases = brand_df["Name & Aliases"].to_list()
 
     # Load Seller Names
     sellers_records = sellers_table.all()
     df = pd.DataFrame(sellers_records)
     seller_df = pd.json_normalize(df.fields)
+    if "Name & Aliases" in seller_df.columns:
+        seller_df["Name & Aliases"] = seller_df["Name & Aliases"].fillna("")
+    else:
+        seller_df["Name & Aliases"] = ""
     sellers_and_aliases = seller_df["Name & Aliases"].to_list()
 
     # Load Factory Names
     factories_records = factories_table.all()
     df = pd.DataFrame(factories_records)
     factory_df = pd.json_normalize(df.fields)
+    if "Name & Aliases" in factory_df.columns:
+        factory_df["Name & Aliases"] = factory_df["Name & Aliases"].fillna("")
+    else:
+        factory_df["Name & Aliases"] = ""
     factory_and_aliases = factory_df["Name & Aliases"].to_list()
 
     # Load Style Names
     styles_records = styles_table.all()
     df = pd.DataFrame(styles_records)
     style_df = pd.json_normalize(df.fields)
+    if "Name & Aliases" in style_df.columns:
+        style_df["Name & Aliases"] = style_df["Name & Aliases"].fillna("")
+    else:
+        style_df["Name & Aliases"] = ""
     styles_and_aliases = style_df["Name & Aliases"].to_list()
 
     return (
@@ -343,78 +360,88 @@ def parse_review_body(post_body):
 ### PARSE IMGUR ALBUM INTO INDIVIDUAL IMAGE LINKS ###
 
 
-def parse_imgur_album(post_body):
+def parse_imgur_album(post_body, submission_id=None):
 
     imgur_images = []
 
     album_regex = r"https://imgur\.com/(?:a|gallery)/[^\s)\]]+"
-    match = re.search(album_regex, post_body)
+    match = re.search(album_regex, post_body or "")
 
     if not match:
         return imgur_images
 
     imgur_url = match.group(0).rstrip(")]}>.,")
-
     path = urlparse(imgur_url).path
     album_hash = path.split("/")[-1].split("-")[-1]
 
     api_url = f"https://api.imgur.com/3/album/{album_hash}/images"
 
-    response = imgur_api.get(api_url)
-    response.raise_for_status()
-
-    payload = response.json()
+    try:
+        response = imgur_api.get(api_url, timeout=10)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as e:
+        print(f"Failed to fetch Imgur album for submission {submission_id}: {repr(e)}")
+        return []
 
     if payload.get("success"):
         return payload["data"][:5]
 
-    print("Imgur API returned an error:")
-    print(payload)
-
+    # API responded but indicated an error
+    print(f"Imgur API returned an error for submission {submission_id}: {payload}")
     return []
 
 
 ### PREPARE ATTACHMENT UPLOAD ###
 
 
-def upload_attachments(record_id, images):
+def upload_attachments(record_id, images, submission_id=None):
 
-    for image in images:
+    if not images:
+        return
 
+    # If pyairtable supports upload_attachment, use it to upload binary content
+    if hasattr(reviews_table, "upload_attachment"):
+        for image in images:
+            try:
+                link = image.get("link")
+                print(f"Uploading {link} for submission {submission_id}")
+
+                image_response = imgur_cdn.get(link, timeout=30)
+                if image_response.status_code != 200:
+                    print(f"Failed to download image for submission {submission_id}: HTTP {image_response.status_code}")
+                    continue
+
+                content_type = image_response.headers.get("Content-Type", "image/jpeg")
+                extension = mimetypes.guess_extension(content_type) or ".jpg"
+                filename = f"{image.get('id')}{extension}"
+
+                # upload_attachment signature may vary by pyairtable version; this follows the earlier usage
+                reviews_table.upload_attachment(
+                    record_id,
+                    FIELD_ATTACHMENT,
+                    filename,
+                    content=image_response.content,
+                    content_type=content_type,
+                )
+
+                print(f"✓ Uploaded {filename} to record {record_id}")
+
+            except Exception as e:
+                print(f"Failed to upload attachment for record {record_id}, submission {submission_id}: {repr(e)}")
+    else:
+        # Fallback: attach remote URLs via an update (Airtable accepts attachments as objects with url)
         try:
-
-            print(f"Uploading {image['link']}")
-
-            image_response = imgur_cdn.get(
-                image["link"],
-                timeout=30,
-            )
-
-            if image_response.status_code != 200:
-                print(image_response.status_code)
-                continue
-
-            content_type = image_response.headers.get(
-                "Content-Type",
-                "image/jpeg",
-            )
-
-            extension = mimetypes.guess_extension(content_type) or ".jpg"
-
-            filename = f"{image['id']}{extension}"
-
-            reviews_table.upload_attachment(
-                record_id,
-                FIELD_ATTACHMENT,
-                filename,
-                content=image_response.content,
-                content_type=content_type,
-            )
-
-            print(f"✓ Uploaded {filename}")
-
+            attachments = []
+            for image in images:
+                link = image.get("link")
+                if link:
+                    attachments.append({"url": link})
+            if attachments:
+                reviews_table.update(record_id, {FIELD_ATTACHMENT: attachments})
+                print(f"✓ Attached {len(attachments)} URLs to record {record_id} (fallback)")
         except Exception as e:
-            print(e)
+            print(f"Failed to attach URLs for record {record_id}, submission {submission_id}: {repr(e)}")
 
 
 ### CREATE AIRTABLE RECORD ###
@@ -560,14 +587,14 @@ def get_reddit_post(submission):
     )
 
     # Get Imgur Album Link
-    imgur_images = parse_imgur_album(submission.selftext)
+    imgur_images = parse_imgur_album(submission.selftext, submission.id)
 
     # Create New Records in Airtable
     record = reviews_table.create(new_record, typecast=True)
     record_id = record["id"]
 
     # Upload images directly to Airtable
-    upload_attachments(record_id, imgur_images)
+    upload_attachments(record_id, imgur_images, submission.id)
 
     # Create Reply Text and Table
     reply_table, reply_sharelink = build_reply_objects(
