@@ -102,12 +102,12 @@ REGEX = {
     # "price-string": { "find": r"(?!=\$)\d+.?\d+|\d+.?\d+(?!=cny|usd)" },
     "Communication": {
         "find": r"(communication.*?(?=\d))(\d+|\d+\W\d+)(\s?/(\s?)10)",
-        "extract": r"(?<=communication).*?(?=\d)",
+        "extract": r"communication.*?(?=\d)",
         "score": r"/(\w?)10",
     },
     "Satisfaction": {
-        "find": r"(satisfaction.*?(?=\d))(\d+|\d+\W\d+)(\s?/\s?)10)",
-        "extract": r"(satisfaction).*?(?=\d)",
+        "find": r"(satisfaction.*?(?=\d))(\d+|\d+\W\d+)(\s?)(/\s?10)",
+        "extract": r"satisfaction.*?(?=\d)",
         "score": r"/(\w?)10",
     },
     "Quality": {
@@ -239,7 +239,6 @@ def load_cardinal_objects():
         factory_and_aliases, factory_df,
     )
 
-
 ### Create data object once ###
 (
     brands_and_aliases, brand_df,
@@ -267,9 +266,21 @@ def get_field(data, key):
 
 def match_cardinal_objects(cardinal_object_array, cardinal_object_type, df, title_lower, title_data):
     for name_alias_string in cardinal_object_array:
+        
+        # 1. Skip completely empty rows from Airtable
+        if not name_alias_string or str(name_alias_string).strip() == "":
+            continue
+            
         for name in name_alias_string.split(", "):
+            name = name.strip()  # Clean up accidental spaces like "Chanel,  Gucci"
+            
+            # 2. Skip empty names after splitting
+            if not name:
+                continue
+                
             regex = rf"(?:\W|^){re.escape(name.lower())}(?:\W|$)"
-            if re.search(regex, title_lower): # Search the title for name/alias
+            
+            if re.search(regex, title_lower):
                 row = df.loc[df["Name & Aliases"].str.contains(regex, case=False, regex=True)]
                 title_data[cardinal_object_type] = {
                     "id": row["record_id"].to_list(),
@@ -337,6 +348,57 @@ def parse_imgur_album(post_body, submission_id=None):
     # API responded but indicated an error
     print(f"Imgur API returned an error for submission {submission_id}: {payload}")
     return []
+
+### PREPARE ATTACHMENT UPLOAD ###
+
+def upload_attachments(record_id, images, submission_id=None):
+
+    if not images:
+        return
+    
+    print(f"[{submission_id}] Downloading {len(images)} images to push directly to Airtable...")
+
+    # If pyairtable supports upload_attachment, use it to upload binary content
+    if hasattr(reviews_table, "upload_attachment"):
+        for image in images:
+            link = image.get("link")
+            if not link:
+                continue
+            try:
+                print(f"Uploading {link} for submission {submission_id}")
+
+                image_response = imgur_cdn.get(link, timeout=30)
+                if image_response.status_code == 200:
+                    content_type = image_response.headers.get("Content-Type", "image/jpeg")
+                    extension = mimetypes.guess_extension(content_type) or ".jpg"
+                    filename = f"{image.get('id')}{extension}"
+
+                    reviews_table.upload_attachment(
+                        record_id,
+                        FIELD_ATTACHMENT,
+                        filename,
+                        content=image_response.content,
+                        content_type=content_type,
+                    )
+                    print(f"✓ Uploaded {filename} to record {record_id}")
+                else:
+                    print(f"Failed to download image for submission {submission_id}: HTTP {image_response.status_code}")
+                    
+            except Exception as e:
+                print(f"Failed to upload attachment for record {record_id}, submission {submission_id}: {repr(e)}")
+    else:
+        # Fallback: attach remote URLs via an update (Airtable accepts attachments as objects with url)
+        try:
+            attachments = []
+            for image in images:
+                link = image.get("link")
+                if link:
+                    attachments.append({"url": link})
+            if attachments:
+                reviews_table.update(record_id, {FIELD_ATTACHMENT: attachments})
+                print(f"✓ Attached {len(attachments)} URLs to record {record_id} (fallback)")
+        except Exception as e:
+            print(f"Failed to attach URLs for record {record_id}, submission {submission_id}: {repr(e)}")
 
 ### CREATE AIRTABLE RECORD ###
 
@@ -457,15 +519,21 @@ def get_reddit_post(submission):
     # PARSE POST BODY WITH REGEX
     regex_data = parse_review_body(submission.selftext)
     imgur_images = parse_imgur_album(submission.selftext, submission.id)
-    new_record = build_airtable_record(submission, regex_data, title_data, imgur_images)
+    new_record = build_airtable_record(submission, regex_data, title_data, [])
 
-    # Push new recordto Airtable
+    # Push new record text to Airtable
     record = reviews_table.create(new_record, typecast=True)
     record_id = record["id"]
-
     # Immediately add to local state to prevent future duplicates on this run
     existing_ids.add(submission.id)
+    print(f"[{submission.id}] Base text record created in Airtable.")
 
+    # Upload images directly to Airtable
+    imgur_images = parse_imgur_album(submission.selftext, submission.id)
+    if imgur_images:
+        upload_attachments(record_id, imgur_images, submission.id)
+
+    # Create Reply Text and Table
     reply_table, reply_sharelink = build_reply_objects(title_data, new_record)
     prefill = build_prefill_link(reply_sharelink, record_id)
     reply_table_str = build_reply_table(reply_table)
