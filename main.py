@@ -1,27 +1,15 @@
 # Import libraries
-import praw  # Mananage the Reddit API
-
+import praw  # Manage the Reddit API
 from pyairtable import Api  # Manage the Airtable API
+import os # from datetime import date to manage dates
+import re # from datetime import date to manage regex
 
-# from datetime import date  # Manage Dates
-import os
-import re
-
-# import json
-import time
+import time # for timing
 import requests  # Manage key functionality
-
 import pandas as pd  # Easily work with tabular data
-
-# for file uploads
-import mimetypes
-
-# for debugging
-import traceback
-
+import mimetypes # for file uploads
+import traceback # for debugging
 from urllib.parse import urlparse, quote_plus
-
-# from operator import indexOf
 from dotenv import load_dotenv
 
 ######################################################
@@ -71,7 +59,6 @@ imgur_api.headers.update(
 imgur_cdn = requests.Session()
 imgur_cdn.headers.update({"User-Agent": IMGUR_USER_AGENT})
 
-
 ######################################################
 ######## CONSTANTS
 ######################################################
@@ -90,10 +77,9 @@ FIELD_PRICE = "Price"
 
 
 ######################################################
-######## AIRTABLE
+######## AIRTABLE INITIALIZATION & CACHING
 ######################################################
 
-# Cache Airtable data
 # Create an object for all things we're regexing
 # Note: Extract and Score should be deprecated in the next update. Currently they're used to indicate whether a string needs further extraction
 REGEX = {
@@ -120,7 +106,7 @@ REGEX = {
         "score": r"/(\w?)10",
     },
     "Satisfaction": {
-        "find": r"(satisfaction.*?(?=\d))(\d+|\d+\W\d+)(\s?/\s?)10",
+        "find": r"(satisfaction.*?(?=\d))(\d+|\d+\W\d+)(\s?/\s?)10)",
         "extract": r"(satisfaction).*?(?=\d)",
         "score": r"/(\w?)10",
     },
@@ -146,23 +132,30 @@ sellers_table = base.table("SELLERS")
 factories_table = base.table("FACTORIES")
 styles_table = base.table("STYLES")
 
-# Calculate max_utc based on LOOKBACK_DAYS and existing records
-print("Calculating max_utc threshold...\n")
+# Calculate max_utc based on LOOKBACK_DAYS and build existing records for deduplication state
+print("Fetching historical records for deduplication and max_utc threshold...\n")
 
-# Get the maximum created_utc from existing Airtable records
-reviews_records = reviews_table.all(fields=["created_utc"])
+# Single bulk fetch to prevent rate limiting for maximum created_utc and existing ids
+reviews_records = reviews_table.all(fields=["created_utc","id"])
 df = pd.DataFrame(reviews_records)
-reviews_df = pd.json_normalize(df.fields)
-utcs = reviews_df["created_utc"].to_list()
-max_utc_from_records = max(utcs) if utcs else 0
+
+if not df.empty and 'fields' in df.columns:
+    reviews_df = pd.json_normalize(df.fields)
+    utcs = reviews_df["created_utc"].dropna().to_list() if "created_utc" in reviews_df.columns else []
+    max_utc_from_records = max(utcs) if utcs else 0
+    # Secure existing IDs in an O(1) lookup set
+    existing_ids = set(reviews_df["id"].dropna().to_list()) if "id" in reviews_df.columns else set()
+else:
+    max_utc_from_records = 0
+    existing_ids = set()
+
+print(f"Loaded {len(existing_ids)} existing record IDs into memory.")
+
 
 if LOOKBACK_DAYS:
-    # Calculate timestamp based on LOOKBACK_DAYS
     lookback_utc = time.time() - (LOOKBACK_DAYS * 24 * 60 * 60)
     
-    # Use the more recent of the two thresholds
-    # If max_utc_from_records exists and is more recent than lookback, use it
-    # Otherwise, use lookback_utc
+    # If max_utc_from_records exists and is more recent than lookback, use it. Otherwise, use lookback_utc
     if max_utc_from_records > 0 and max_utc_from_records > lookback_utc:
         max_utc = max_utc_from_records
         print(f"Using max record UTC ({max_utc}) - more recent than {LOOKBACK_DAYS}-day lookback\n")
@@ -170,7 +163,6 @@ if LOOKBACK_DAYS:
         max_utc = lookback_utc
         print(f"Using {LOOKBACK_DAYS}-day lookback (max_utc={max_utc})\n")
 else:
-    # No LOOKBACK_DAYS: use the max from existing records
     max_utc = max_utc_from_records
     print(f"Using last Airtable review (max_utc={max_utc})\n")
 
@@ -181,12 +173,8 @@ print(
 )
 
 ######################################################
-######## REDDIT
+######## LOAD REDDIT & SUBREDDIT
 ######################################################
-
-
-### LOAD REDDIT & SUBREDDIT ###
-
 
 def load_reddit():
     print("Initializing Reddit Client...")
@@ -200,27 +188,19 @@ def load_reddit():
     )
 
     print("Testing Reddit connection...")
-
     try:
         print("Logged in as:", reddit.user.me())
     except Exception as e:
         print("Reddit auth failed:", repr(e))
         raise
-
     print("Loading subreddit...")
-
     subreddit = reddit.subreddit("luxelife")
-
     print("Subreddit loaded.")
-
     return reddit, subreddit
-
-
 reddit, subreddit = load_reddit()
 
 
 ################## HELPER FUNCTIONS ##################
-
 
 ### LOAD CARIDINAL OBJECT DATA ###
 def load_cardinal_objects():
@@ -228,67 +208,45 @@ def load_cardinal_objects():
     brands_records = brands_table.all()
     df = pd.DataFrame(brands_records)
     brand_df = pd.json_normalize(df.fields)
-    if "Name & Aliases" in brand_df.columns:
-        brand_df["Name & Aliases"] = brand_df["Name & Aliases"].fillna("")
-    else:
-        brand_df["Name & Aliases"] = ""
-
+    brand_df["Name & Aliases"] = brand_df.get("Name & Aliases", "").fillna("")
     brands_and_aliases = brand_df["Name & Aliases"].to_list()
 
     # Load Seller Names
     sellers_records = sellers_table.all()
     df = pd.DataFrame(sellers_records)
     seller_df = pd.json_normalize(df.fields)
-    if "Name & Aliases" in seller_df.columns:
-        seller_df["Name & Aliases"] = seller_df["Name & Aliases"].fillna("")
-    else:
-        seller_df["Name & Aliases"] = ""
+    seller_df["Name & Aliases"] = seller_df.get("Name & Aliases", "").fillna("")
     sellers_and_aliases = seller_df["Name & Aliases"].to_list()
 
     # Load Factory Names
     factories_records = factories_table.all()
     df = pd.DataFrame(factories_records)
     factory_df = pd.json_normalize(df.fields)
-    if "Name & Aliases" in factory_df.columns:
-        factory_df["Name & Aliases"] = factory_df["Name & Aliases"].fillna("")
-    else:
-        factory_df["Name & Aliases"] = ""
+    factory_df["Name & Aliases"] = factory_df.get("Name & Aliases", "").fillna("")
     factory_and_aliases = factory_df["Name & Aliases"].to_list()
 
     # Load Style Names
     styles_records = styles_table.all()
     df = pd.DataFrame(styles_records)
     style_df = pd.json_normalize(df.fields)
-    if "Name & Aliases" in style_df.columns:
-        style_df["Name & Aliases"] = style_df["Name & Aliases"].fillna("")
-    else:
-        style_df["Name & Aliases"] = ""
+    style_df["Name & Aliases"] = style_df.get("Name & Aliases", "").fillna("")
     styles_and_aliases = style_df["Name & Aliases"].to_list()
 
     return (
-        brands_and_aliases,
-        brand_df,
-        sellers_and_aliases,
-        seller_df,
-        styles_and_aliases,
-        style_df,
-        factory_and_aliases,
-        factory_df,
+        brands_and_aliases, brand_df,
+        sellers_and_aliases, seller_df,
+        styles_and_aliases, style_df,
+        factory_and_aliases, factory_df,
     )
 
 
 ### Create data object once ###
 (
-    brands_and_aliases,
-    brand_df,
-    sellers_and_aliases,
-    seller_df,
-    styles_and_aliases,
-    style_df,
-    factory_and_aliases,
-    factory_df,
+    brands_and_aliases, brand_df,
+    sellers_and_aliases, seller_df,
+    styles_and_aliases, style_df,
+    factory_and_aliases, factory_df,
 ) = load_cardinal_objects()
-
 
 LOOKUPS = [
     (brands_and_aliases, FIELD_BRAND, brand_df),
@@ -297,59 +255,34 @@ LOOKUPS = [
     (factory_and_aliases, FIELD_FACTORY, factory_df),
 ]
 
-
 def get_name(data, key):
     return data.get(key, {}).get("name")
-
-
 def get_id(data, key):
     return data.get(key, {}).get("id")
-
-
 def get_field(data, key):
     return data.get(key)
-
 
 ### Check Cardinal Objects (Seller, Brand, Factory, Style) ###
 
 
-def match_cardinal_objects(
-    cardinal_object_array,
-    cardinal_object_type,
-    df,
-    title_lower,
-    title_data,
-):
-
+def match_cardinal_objects(cardinal_object_array, cardinal_object_type, df, title_lower, title_data):
     for name_alias_string in cardinal_object_array:
-
         for name in name_alias_string.split(", "):
             regex = rf"(?:\W|^){re.escape(name.lower())}(?:\W|$)"
-            # Search the title for name/alias
-
-            if re.search(regex, title_lower):
-                row = df.loc[
-                    df["Name & Aliases"].str.contains(regex, case=False, regex=True)
-                ]
+            if re.search(regex, title_lower): # Search the title for name/alias
+                row = df.loc[df["Name & Aliases"].str.contains(regex, case=False, regex=True)]
                 title_data[cardinal_object_type] = {
                     "id": row["record_id"].to_list(),
                     "name": name,
                 }
 
-
 def parse_review_body(post_body):
-    # Guard against None
-    post_body = post_body or ""
-
-    # Convert body to lowercase to make regex matching easier
-    lower_body = post_body.lower()
-
+    post_body = post_body or "" # Guard against None
+    lower_body = post_body.lower() # Convert body to lowercase to make regex matching easier
     regex_data = {}
 
-    # For each regex pattern
     for field, config in REGEX.items():
         match = re.search(config["find"], lower_body)
-
         if not match:
             continue
 
@@ -378,9 +311,7 @@ def parse_review_body(post_body):
 
 
 def parse_imgur_album(post_body, submission_id=None):
-
     imgur_images = []
-
     album_regex = r"https://imgur\.com/(?:a|gallery)/[^\s)\]]+"
     match = re.search(album_regex, post_body or "")
 
@@ -390,7 +321,6 @@ def parse_imgur_album(post_body, submission_id=None):
     imgur_url = match.group(0).rstrip(")]}>.,")
     path = urlparse(imgur_url).path
     album_hash = path.split("/")[-1].split("-")[-1]
-
     api_url = f"https://api.imgur.com/3/album/{album_hash}/images"
 
     try:
@@ -408,63 +338,9 @@ def parse_imgur_album(post_body, submission_id=None):
     print(f"Imgur API returned an error for submission {submission_id}: {payload}")
     return []
 
-
-### PREPARE ATTACHMENT UPLOAD ###
-
-
-def upload_attachments(record_id, images, submission_id=None):
-
-    if not images:
-        return
-
-    # If pyairtable supports upload_attachment, use it to upload binary content
-    if hasattr(reviews_table, "upload_attachment"):
-        for image in images:
-            try:
-                link = image.get("link")
-                print(f"Uploading {link} for submission {submission_id}")
-
-                image_response = imgur_cdn.get(link, timeout=30)
-                if image_response.status_code != 200:
-                    print(f"Failed to download image for submission {submission_id}: HTTP {image_response.status_code}")
-                    continue
-
-                content_type = image_response.headers.get("Content-Type", "image/jpeg")
-                extension = mimetypes.guess_extension(content_type) or ".jpg"
-                filename = f"{image.get('id')}{extension}"
-
-                # upload_attachment signature may vary by pyairtable version; this follows the earlier usage
-                reviews_table.upload_attachment(
-                    record_id,
-                    FIELD_ATTACHMENT,
-                    filename,
-                    content=image_response.content,
-                    content_type=content_type,
-                )
-
-                print(f"✓ Uploaded {filename} to record {record_id}")
-
-            except Exception as e:
-                print(f"Failed to upload attachment for record {record_id}, submission {submission_id}: {repr(e)}")
-    else:
-        # Fallback: attach remote URLs via an update (Airtable accepts attachments as objects with url)
-        try:
-            attachments = []
-            for image in images:
-                link = image.get("link")
-                if link:
-                    attachments.append({"url": link})
-            if attachments:
-                reviews_table.update(record_id, {FIELD_ATTACHMENT: attachments})
-                print(f"✓ Attached {len(attachments)} URLs to record {record_id} (fallback)")
-        except Exception as e:
-            print(f"Failed to attach URLs for record {record_id}, submission {submission_id}: {repr(e)}")
-
-
 ### CREATE AIRTABLE RECORD ###
 
-
-def build_airtable_record(submission, regex_data, title_data):
+def build_airtable_record(submission, regex_data, title_data, imgur_images):
 
     record = {
         "title": submission.title,
@@ -474,49 +350,38 @@ def build_airtable_record(submission, regex_data, title_data):
         "created_utc": submission.created_utc,
     }
 
-    # Add parsed regex fields
+    # Add parsed regex fields & linked Airtable record IDs
     record.update(regex_data)
-
-    # Add linked Airtable record IDs
     for field, value in title_data.items():
         record[field] = value["id"]
 
+    # Map Imgur URLs directly to Airtable Attachment format
+    if imgur_images:
+        record[FIELD_ATTACHMENT] = [{"url": img.get("link")} for img in imgur_images if img.get("link")]
+    
     return record
 
 
 ### CREATE PRE-FILL LINK ###
 
-
 def build_prefill_link(reply_sharelink, record_id):
-
-    # Base prefill
     prefill = "https://airtable.com/shrgaB9P7ktxOgdJJ"
     first = True
-
     for item, value in reply_sharelink.items():
         if value is None:
             continue
-
         separator = "?" if first else "&"
-
-        # If value is a list, join with commas; otherwise stringify
         encoded = ",".join(value) if isinstance(value, list) else str(value)
-        # URL-encode the parameter value
         safe = quote_plus(encoded)
-
         prefill += f"{separator}prefill_{item}={safe}"
         first = False
-
     prefill += f"&prefill_Review={quote_plus(str(record_id))}"
-
     return prefill
 
 
 ### CREATE REPLY OBJECTS ###
 
-
 def build_reply_objects(title_data, new_record):
-
     reply_table = {
         FIELD_BRAND: get_name(title_data, FIELD_BRAND),
         FIELD_SELLER: get_name(title_data, FIELD_SELLER),
@@ -528,7 +393,6 @@ def build_reply_objects(title_data, new_record):
         FIELD_SATISFACTION: get_field(new_record, FIELD_SATISFACTION),
         FIELD_PRICE: None,
     }
-
     reply_sharelink = {
         FIELD_BRAND: get_id(title_data, FIELD_BRAND),
         FIELD_SELLER: get_id(title_data, FIELD_SELLER),
@@ -540,121 +404,92 @@ def build_reply_objects(title_data, new_record):
         FIELD_SATISFACTION: get_field(new_record, FIELD_SATISFACTION),
         FIELD_PRICE: None,
     }
-
     return reply_table, reply_sharelink
 
 
 ### CREATE REPLY TABLE ###
 
-
 def build_reply_table(reply_table):
-
     headers = "|".join(reply_table.keys())
     divider = "".join(["|:-"] * len(reply_table))
     values = "|".join(str(v) if v is not None else " - " for v in reply_table.values())
-
-    return "\n".join(
-        [
-            headers,
-            divider,
-            values,
-        ]
-    )
-
+    return "\n".join([headers, divider, values])
 
 ### CHECK IF RECORD ALREADY EXISTS ###
 
 
 def record_exists(submission_id):
-    """Check if a post with the given submission ID already exists in Airtable."""
-    try:
-        existing = reviews_table.all(formula=f"{{id}}='{submission_id}'")
-        return len(existing) > 0
-    except Exception as e:
-        print(f"Error checking for existing record {submission_id}: {e}")
-        return False
+    """O(1) Deduplication Check against memory."""
+    return submission_id in existing_ids
+
+def bot_already_replied(submission):
+    """Check if the bot has already left a top-level comment on this post."""
+    submission.comments.replace_more(limit=0)
+    for comment in submission.comments:
+        if comment.author and comment.author.name == REDDIT_USERNAME:
+            return True
+    return False
 
 ### GET NEW POSTS ###
-
 
 def get_reddit_post(submission):
 
     if submission.created_utc <= max_utc:
         return
 
-    # Check if post already exists in Airtable (deduplication)
+    # Check if post already exists in deduplication memory
     if record_exists(submission.id):
         print(f"Post {submission.id} already exists. Skipping...\n")
         return
 
-    if not submission.link_flair_text:
-        return
-
-    if "Review" not in submission.link_flair_text:
+    if not submission.link_flair_text or "Review" not in submission.link_flair_text:
         return
 
     print(submission.title)
-
     title_lower = submission.title.lower()
-
     title_data = {}
 
     for aliases, field, dataframe in LOOKUPS:
-        match_cardinal_objects(
-            aliases,
-            field,
-            dataframe,
-            title_lower,
-            title_data,
-        )
+        match_cardinal_objects(aliases, field, dataframe, title_lower, title_data)
 
     print(title_data)
 
     # PARSE POST BODY WITH REGEX
     regex_data = parse_review_body(submission.selftext)
-
-    # CREATE NEW RECORD OBJECT TO UPLOAD
-    new_record = build_airtable_record(
-        submission,
-        regex_data,
-        title_data,
-    )
-
-    # Get Imgur Album Link
     imgur_images = parse_imgur_album(submission.selftext, submission.id)
+    new_record = build_airtable_record(submission, regex_data, title_data, imgur_images)
 
-    # Create New Records in Airtable
+    # Push new recordto Airtable
     record = reviews_table.create(new_record, typecast=True)
     record_id = record["id"]
 
-    # Upload images directly to Airtable
-    upload_attachments(record_id, imgur_images, submission.id)
+    # Immediately add to local state to prevent future duplicates on this run
+    existing_ids.add(submission.id)
 
-    # Create Reply Text and Table
-    reply_table, reply_sharelink = build_reply_objects(
-        title_data,
-        new_record,
-    )
+    reply_table, reply_sharelink = build_reply_objects(title_data, new_record)
+    prefill = build_prefill_link(reply_sharelink, record_id)
+    reply_table_str = build_reply_table(reply_table)
 
-    # Add Record ID to prefill
-    prefill = build_prefill_link(
-        reply_sharelink,
-        record_id,
-    )
-
-    # Create reply table
-    reply_table = build_reply_table(reply_table)
-
-    print(reply_table)
+    print(reply_table_str)
 
     text_reply = (
       f"👋🏾 Hello, LuxeLife Bot here! This is a summary of your post. If this info looks incorrect or missing anything, please [update your submission via this form]({prefill}). \n\n *Please send mod mail if you encounter problems with this bot.* \n\n \n"
-      + reply_table
+      + reply_table_str
     )
 
     if ENABLE_POST_REPLIES:
-        comment = submission.reply(body=text_reply)
-        comment.mod.distinguish(sticky=True)
+        if bot_already_replied(submission):
+            print(f"Bot already replied to {submission.id}. Skipping comment.\n")
+        else:
+            try:
+                comment = submission.reply(body=text_reply)
+                try:
+                    comment.mod.distinguish(sticky=True)
+                    print(f"✓ Reply posted and stickied for {submission.id}\n")
+                except Exception as mod_err:
+                    print(f"✓ Reply posted, but could not sticky (Missing mod privileges). {mod_err}\n")
+            except Exception as reply_err:
+                print(f"Failed to post Reddit reply for {submission.id}: {reply_err}\n")
     else:
         print("Skipping Reddit reply (ENABLE_POST_REPLIES=false)\n")
 
@@ -666,7 +501,6 @@ def process_submission(submission):
     except Exception as e:
         print(f"Failed processing {submission.id}: {e}")
         traceback.print_exc()
-
 
 ######################################################
 ######## RUNTIME
