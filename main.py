@@ -7,6 +7,7 @@ import re # from datetime import date to manage regex
 import time # for timing
 import requests  # Manage key functionality
 import pandas as pd  # Easily work with tabular data
+import html # for grabbing Reddit images
 import mimetypes # for file uploads
 import traceback # for debugging
 from urllib.parse import urlparse, quote_plus
@@ -199,8 +200,9 @@ def load_reddit():
     return reddit, subreddit
 reddit, subreddit = load_reddit()
 
-
-################## HELPER FUNCTIONS ##################
+######################################################
+######## HELPER FUNCTIONS
+######################################################
 
 ### LOAD CARIDINAL OBJECT DATA ###
 def load_cardinal_objects():
@@ -263,7 +265,6 @@ def get_field(data, key):
 
 ### Check Cardinal Objects (Seller, Brand, Factory, Style) ###
 
-
 def match_cardinal_objects(cardinal_object_array, cardinal_object_type, df, title_lower, title_data):
     for name_alias_string in cardinal_object_array:
         
@@ -317,9 +318,7 @@ def parse_review_body(post_body):
 
     return regex_data
 
-
 ### PARSE IMGUR ALBUM INTO INDIVIDUAL IMAGE LINKS ###
-
 
 def parse_imgur_album(post_body, submission_id=None):
     imgur_images = []
@@ -348,6 +347,33 @@ def parse_imgur_album(post_body, submission_id=None):
     # API responded but indicated an error
     print(f"Imgur API returned an error for submission {submission_id}: {payload}")
     return []
+
+### PARSE REDDIT GALLERY OR IMAGE ###
+
+def parse_reddit_images(submission):
+    images = []
+
+    # 1. Handle Reddit Galleries (Multiple Images)
+    if hasattr(submission, "is_gallery") and submission.is_gallery:
+        if hasattr(submission, "media_metadata"):
+            for media_id, media_info in submission.media_metadata.items():
+                if media_info.get("status") == "valid":
+                    # 's' contains the source (highest resolution) image
+                    if "s" in media_info and "u" in media_info["s"]:
+                        # Reddit escapes '&' as '&amp;'. We must unescape it to download properly.
+                        raw_url = html.unescape(media_info["s"]["u"])
+                        images.append({"id": media_id, "link": raw_url})
+                    elif "s" in media_info and "gif" in media_info["s"]:
+                        raw_url = html.unescape(media_info["s"]["gif"])
+                        images.append({"id": media_id, "link": raw_url})
+                        
+    # 2. Handle Single Image Uploads
+    elif hasattr(submission, "post_hint") and submission.post_hint == "image":
+        # For single images, the direct link is just the submission URL
+        media_id = f"{submission.id}_single"
+        images.append({"id": media_id, "link": submission.url})
+
+    return images
 
 ### PREPARE ATTACHMENT UPLOAD ###
 
@@ -479,7 +505,6 @@ def build_reply_table(reply_table):
 
 ### CHECK IF RECORD ALREADY EXISTS ###
 
-
 def record_exists(submission_id):
     """O(1) Deduplication Check against memory."""
     return submission_id in existing_ids
@@ -497,14 +522,16 @@ def bot_already_replied(submission):
 def get_reddit_post(submission):
 
     if submission.created_utc <= max_utc:
+        print(f"Post {submission.id} is older than the most recently recorded record. Skipping...\n")
+        return
+
+    if submission.link_flair_text != "Review":
+        print(f"Post {submission.id} is not a Review. Skipping...\n")
         return
 
     # Check if post already exists in deduplication memory
     if record_exists(submission.id):
         print(f"Post {submission.id} already exists. Skipping...\n")
-        return
-
-    if not submission.link_flair_text or "Review" not in submission.link_flair_text:
         return
 
     print(submission.title)
@@ -528,10 +555,14 @@ def get_reddit_post(submission):
     existing_ids.add(submission.id)
     print(f"[{submission.id}] Base text record created in Airtable.")
 
-    # Upload images directly to Airtable
+    # Extract images from both Imgur and Native Reddit
     imgur_images = parse_imgur_album(submission.selftext, submission.id)
-    if imgur_images:
-        upload_attachments(record_id, imgur_images, submission.id)
+    reddit_images = parse_reddit_images(submission)
+    # Combine the lists and cap it at 10 total images to prevent bloated Airtable records
+    all_images = (reddit_images + imgur_images)[:10]
+    # Upload images directly to Airtable
+    if all_images:
+        upload_attachments(record_id, all_images, submission.id)
 
     # Create Reply Text and Table
     reply_table, reply_sharelink = build_reply_objects(title_data, new_record)
