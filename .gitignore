@@ -1,8 +1,21 @@
+# Never commit these files!
 .env
+*.env
 .env.dev
+secrets.txt
+credentials.json
 
-.vscode
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
 
-venv
+# IDE
+.idea/
+.vscode/
+*.swp
 
-__pycache__
+# OS
+.DS_Store
+Thumbs.db
