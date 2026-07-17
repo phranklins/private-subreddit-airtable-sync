@@ -34,15 +34,16 @@ IMGUR_CLIENT_ID = os.environ.get("IMGUR_CLIENT_ID")
 IMGUR_CLIENT_SECRET = os.environ.get("IMGUR_CLIENT_SECRET")
 IMGUR_USER_AGENT = os.environ.get("IMGUR_USER_AGENT")
 
-LOOKBACK_DAYS = os.environ.get("REVIEW_LOOKBACK_DAYS")
-if LOOKBACK_DAYS:
-    LOOKBACK_DAYS = int(LOOKBACK_DAYS)
-
 ENABLE_POST_REPLIES = os.environ.get("ENABLE_POST_REPLIES", "true").lower() in (
     "true",
     "1",
     "yes",
 )
+
+# If set, script runs in Backfill mode. If missing/empty, runs in Daily Cron mode.
+LOOKBACK_DAYS = os.environ.get("REVIEW_LOOKBACK_DAYS")
+if LOOKBACK_DAYS:
+    LOOKBACK_DAYS = int(LOOKBACK_DAYS)
 
 ######################################################
 ######## IMGUR HTTP SESSION
@@ -123,7 +124,6 @@ REGEX = {
     },
 }
 
-# Load Airtable and Get Max UTC
 print("\nInitializing Airtable Client... \n")
 api = Api(AIRTABLE_API_KEY)
 base = api.base(AIRTABLE_BASE_ID)
@@ -133,40 +133,34 @@ sellers_table = base.table("SELLERS")
 factories_table = base.table("FACTORIES")
 styles_table = base.table("STYLES")
 
-# Calculate max_utc based on LOOKBACK_DAYS and build existing records for deduplication state
-print("Fetching historical records for deduplication and max_utc threshold...\n")
+if LOOKBACK_DAYS:
+    print(f"BACKFILL MODE: Fetching all historical records for deep deduplication...\n")
+    reviews_records = reviews_table.all(fields=["id"])
+    most_recent_utc = 0 
+else:
+    print("CRON MODE: Fetching recent records for daily sync deduplication...\n")
+    two_days_ago_utc = int(time.time()) - (2 * 24 * 60 * 60)
+    # Target only records from the last 48 hours based on their created_utc number field
+    formula = f"{{created_utc}} >= {two_days_ago_utc}"
+    reviews_records = reviews_table.all(fields=["id", "created_utc"], formula=formula)
+    
+    df_recent = pd.DataFrame(reviews_records)
+    if not df_recent.empty and 'fields' in df_recent.columns:
+        recent_df = pd.json_normalize(df_recent.fields)
+        utcs = recent_df["created_utc"].dropna().to_list() if "created_utc" in recent_df.columns else []
+        most_recent_utc = max(utcs) if utcs else 0
+    else:
+        most_recent_utc = 0
 
-# Single bulk fetch to prevent rate limiting for maximum created_utc and existing ids
-reviews_records = reviews_table.all(fields=["created_utc","id"])
+# Extract existing IDs for O(1) lookup
 df = pd.DataFrame(reviews_records)
-
 if not df.empty and 'fields' in df.columns:
     reviews_df = pd.json_normalize(df.fields)
-    utcs = reviews_df["created_utc"].dropna().to_list() if "created_utc" in reviews_df.columns else []
-    max_utc_from_records = max(utcs) if utcs else 0
-    # Secure existing IDs in an O(1) lookup set
     existing_ids = set(reviews_df["id"].dropna().to_list()) if "id" in reviews_df.columns else set()
 else:
-    max_utc_from_records = 0
     existing_ids = set()
 
-print(f"Loaded {len(existing_ids)} existing record IDs into memory.")
-
-
-if LOOKBACK_DAYS:
-    lookback_utc = time.time() - (LOOKBACK_DAYS * 24 * 60 * 60)
-    
-    # If max_utc_from_records exists and is more recent than lookback, use it. Otherwise, use lookback_utc
-    if max_utc_from_records > 0 and max_utc_from_records > lookback_utc:
-        max_utc = max_utc_from_records
-        print(f"Using max record UTC ({max_utc}) - more recent than {LOOKBACK_DAYS}-day lookback\n")
-    else:
-        max_utc = lookback_utc
-        print(f"Using {LOOKBACK_DAYS}-day lookback (max_utc={max_utc})\n")
-else:
-    max_utc = max_utc_from_records
-    print(f"Using last Airtable review (max_utc={max_utc})\n")
-
+print(f"Loaded {len(existing_ids)} existing record IDs into memory.\n")
 print(
     "Post replies enabled\n"
     if ENABLE_POST_REPLIES
@@ -179,7 +173,6 @@ print(
 
 def load_reddit():
     print("Initializing Reddit Client...")
-
     reddit = praw.Reddit(
         client_id=REDDIT_CLIENT_ID,
         client_secret=REDDIT_CLIENT_SECRET,
@@ -187,7 +180,6 @@ def load_reddit():
         password=REDDIT_PASSWORD,
         user_agent=REDDIT_USER_AGENT,
     )
-
     print("Testing Reddit connection...")
     try:
         print("Logged in as:", reddit.user.me())
@@ -198,36 +190,34 @@ def load_reddit():
     subreddit = reddit.subreddit("luxelife")
     print("Subreddit loaded.")
     return reddit, subreddit
+
 reddit, subreddit = load_reddit()
 
 ######################################################
 ######## HELPER FUNCTIONS
 ######################################################
 
-### LOAD CARIDINAL OBJECT DATA ###
+### LOAD REFERENCE LISTS ###
+
 def load_cardinal_objects():
-    # Load Brand Names
     brands_records = brands_table.all()
     df = pd.DataFrame(brands_records)
     brand_df = pd.json_normalize(df.fields)
     brand_df["Name & Aliases"] = brand_df.get("Name & Aliases", "").fillna("")
     brands_and_aliases = brand_df["Name & Aliases"].to_list()
 
-    # Load Seller Names
     sellers_records = sellers_table.all()
     df = pd.DataFrame(sellers_records)
     seller_df = pd.json_normalize(df.fields)
     seller_df["Name & Aliases"] = seller_df.get("Name & Aliases", "").fillna("")
     sellers_and_aliases = seller_df["Name & Aliases"].to_list()
 
-    # Load Factory Names
     factories_records = factories_table.all()
     df = pd.DataFrame(factories_records)
     factory_df = pd.json_normalize(df.fields)
     factory_df["Name & Aliases"] = factory_df.get("Name & Aliases", "").fillna("")
     factory_and_aliases = factory_df["Name & Aliases"].to_list()
 
-    # Load Style Names
     styles_records = styles_table.all()
     df = pd.DataFrame(styles_records)
     style_df = pd.json_normalize(df.fields)
@@ -241,7 +231,6 @@ def load_cardinal_objects():
         factory_and_aliases, factory_df,
     )
 
-### Create data object once ###
 (
     brands_and_aliases, brand_df,
     sellers_and_aliases, seller_df,
@@ -263,19 +252,13 @@ def get_id(data, key):
 def get_field(data, key):
     return data.get(key)
 
-### Check Cardinal Objects (Seller, Brand, Factory, Style) ###
-
 def match_cardinal_objects(cardinal_object_array, cardinal_object_type, df, title_lower, title_data):
     for name_alias_string in cardinal_object_array:
-        
-        # 1. Skip completely empty rows from Airtable
         if not name_alias_string or str(name_alias_string).strip() == "":
             continue
             
         for name in name_alias_string.split(", "):
-            name = name.strip()  # Clean up accidental spaces like "Chanel,  Gucci"
-            
-            # 2. Skip empty names after splitting
+            name = name.strip() 
             if not name:
                 continue
                 
@@ -289,8 +272,8 @@ def match_cardinal_objects(cardinal_object_array, cardinal_object_type, df, titl
                 }
 
 def parse_review_body(post_body):
-    post_body = post_body or "" # Guard against None
-    lower_body = post_body.lower() # Convert body to lowercase to make regex matching easier
+    post_body = post_body or "" 
+    lower_body = post_body.lower() 
     regex_data = {}
 
     for field, config in REGEX.items():
@@ -300,7 +283,6 @@ def parse_review_body(post_body):
 
         if "extract" in config:
             raw_value = match.group(2) if match.groups() and len(match.groups()) >= 2 else match.group(1)
-            # If this field is a score, normalize to a float and clamp to 10
             if "score" in config:
                 try:
                     normalized = str(raw_value).replace(",", ".").strip()
@@ -309,7 +291,6 @@ def parse_review_body(post_body):
                         num = 10.0
                     regex_data[field] = num
                 except (ValueError, TypeError):
-                    # Fall back to the raw string if conversion fails
                     regex_data[field] = raw_value
             else:
                 regex_data[field] = raw_value
@@ -344,7 +325,6 @@ def parse_imgur_album(post_body, submission_id=None):
     if payload.get("success"):
         return payload["data"][:5]
 
-    # API responded but indicated an error
     print(f"Imgur API returned an error for submission {submission_id}: {payload}")
     return []
 
@@ -352,24 +332,18 @@ def parse_imgur_album(post_body, submission_id=None):
 
 def parse_reddit_images(submission):
     images = []
-
-    # 1. Handle Reddit Galleries (Multiple Images)
     if hasattr(submission, "is_gallery") and submission.is_gallery:
         if hasattr(submission, "media_metadata"):
             for media_id, media_info in submission.media_metadata.items():
                 if media_info.get("status") == "valid":
-                    # 's' contains the source (highest resolution) image
                     if "s" in media_info and "u" in media_info["s"]:
-                        # Reddit escapes '&' as '&amp;'. We must unescape it to download properly.
                         raw_url = html.unescape(media_info["s"]["u"])
                         images.append({"id": media_id, "link": raw_url})
                     elif "s" in media_info and "gif" in media_info["s"]:
                         raw_url = html.unescape(media_info["s"]["gif"])
                         images.append({"id": media_id, "link": raw_url})
                         
-    # 2. Handle Single Image Uploads
     elif hasattr(submission, "post_hint") and submission.post_hint == "image":
-        # For single images, the direct link is just the submission URL
         media_id = f"{submission.id}_single"
         images.append({"id": media_id, "link": submission.url})
 
@@ -378,13 +352,12 @@ def parse_reddit_images(submission):
 ### PREPARE ATTACHMENT UPLOAD ###
 
 def upload_attachments(record_id, images, submission_id=None):
-
     if not images:
         return
     
     print(f"[{submission_id}] Downloading {len(images)} images to push directly to Airtable...")
 
-    # If pyairtable supports upload_attachment, use it to upload binary content
+    # If pyairtable supports upload_attachment, use it to upload binary content 
     if hasattr(reviews_table, "upload_attachment"):
         for image in images:
             link = image.get("link")
@@ -412,8 +385,7 @@ def upload_attachments(record_id, images, submission_id=None):
                     
             except Exception as e:
                 print(f"Failed to upload attachment for record {record_id}, submission {submission_id}: {repr(e)}")
-    else:
-        # Fallback: attach remote URLs via an update (Airtable accepts attachments as objects with url)
+    else: # Fallback: attach remote URLs via an update (Airtable accepts attachments as objects with url)
         try:
             attachments = []
             for image in images:
@@ -429,7 +401,6 @@ def upload_attachments(record_id, images, submission_id=None):
 ### CREATE AIRTABLE RECORD ###
 
 def build_airtable_record(submission, regex_data, title_data, imgur_images):
-
     record = {
         "title": submission.title,
         "url": submission.url,
@@ -438,17 +409,14 @@ def build_airtable_record(submission, regex_data, title_data, imgur_images):
         "created_utc": submission.created_utc,
     }
 
-    # Add parsed regex fields & linked Airtable record IDs
     record.update(regex_data)
     for field, value in title_data.items():
         record[field] = value["id"]
 
-    # Map Imgur URLs directly to Airtable Attachment format
     if imgur_images:
         record[FIELD_ATTACHMENT] = [{"url": img.get("link")} for img in imgur_images if img.get("link")]
     
     return record
-
 
 ### CREATE PRE-FILL LINK ###
 
@@ -466,9 +434,7 @@ def build_prefill_link(reply_sharelink, record_id):
     prefill += f"&prefill_Review={quote_plus(str(record_id))}"
     return prefill
 
-
-### CREATE REPLY OBJECTS ###
-
+### CREATE POST REPLY OBJECTS ###
 def build_reply_objects(title_data, new_record):
     reply_table = {
         FIELD_BRAND: get_name(title_data, FIELD_BRAND),
@@ -494,9 +460,6 @@ def build_reply_objects(title_data, new_record):
     }
     return reply_table, reply_sharelink
 
-
-### CREATE REPLY TABLE ###
-
 def build_reply_table(reply_table):
     headers = "|".join(reply_table.keys())
     divider = "".join(["|:-"] * len(reply_table))
@@ -517,19 +480,17 @@ def bot_already_replied(submission):
             return True
     return False
 
+######################################################
+######## CORE PROCESSING LOGIC
+######################################################
+
 ### GET NEW POSTS ###
 
 def get_reddit_post(submission):
 
-    if submission.created_utc <= max_utc:
-        print(f"Post {submission.id} is older than the most recently recorded record. Skipping...\n")
-        return
-
     if submission.link_flair_text != "Review":
-        print(f"Post {submission.id} is not a Review. Skipping...\n")
         return
 
-    # Check if post already exists in deduplication memory
     if record_exists(submission.id):
         print(f"Post {submission.id} already exists. Skipping...\n")
         return
@@ -558,13 +519,11 @@ def get_reddit_post(submission):
     # Extract images from both Imgur and Native Reddit
     imgur_images = parse_imgur_album(submission.selftext, submission.id)
     reddit_images = parse_reddit_images(submission)
-    # Combine the lists and cap it at 10 total images to prevent bloated Airtable records
     all_images = (reddit_images + imgur_images)[:10]
-    # Upload images directly to Airtable
+    
     if all_images:
         upload_attachments(record_id, all_images, submission.id)
 
-    # Create Reply Text and Table
     reply_table, reply_sharelink = build_reply_objects(title_data, new_record)
     prefill = build_prefill_link(reply_sharelink, record_id)
     reply_table_str = build_reply_table(reply_table)
@@ -588,12 +547,17 @@ def get_reddit_post(submission):
                 except Exception as mod_err:
                     print(f"✓ Reply posted, but could not sticky (Missing mod privileges). {mod_err}\n")
             except Exception as reply_err:
-                print(f"Failed to post Reddit reply for {submission.id}: {reply_err}\n")
+                # ROLLBACK: If reply fails (e.g., rate limit), delete Airtable record so cron retries it
+                print(f"Failed to post Reddit reply for {submission.id}: {reply_err}")
+                print(f"Rolling back Airtable record {record_id} to ensure retry on next run...\n")
+                reviews_table.delete(record_id)
+                existing_ids.remove(submission.id)
+                return 
     else:
         print("Skipping Reddit reply (ENABLE_POST_REPLIES=false)\n")
 
-
 ### GET POST DETAILS ####
+
 def process_submission(submission):
     try:
         get_reddit_post(submission)
@@ -606,13 +570,25 @@ def process_submission(submission):
 ######################################################
 
 if LOOKBACK_DAYS:
-    print("Starting backfill...")
+    print(f"Starting chunked backfill for the last {LOOKBACK_DAYS} days...")
+    backfill_cutoff_utc = time.time() - (LOOKBACK_DAYS * 24 * 60 * 60)
 
-    # Backfill recent posts instead of waiting on the live stream
-    for submission in subreddit.new(limit=50):
-        if submission.created_utc <= max_utc:
-            break
-        process_submission(submission)
+    characters = list("zqxjkvbpygfwmuclrhsnioate0123456789")
+    queries = [f'flair:"Review" AND title:{char}' for char in characters]
+    queries.append('flair:"Review"') 
+
+    for query in queries:
+        print(f"Executing backfill query: {query}")
+        for submission in subreddit.search(query, sort='new', limit=1000):
+            if submission.created_utc < backfill_cutoff_utc:
+                continue 
+            process_submission(submission)
+
 else:
-    for submission in subreddit.stream.submissions():
+    print("Starting daily cron sync...")
+    for submission in subreddit.new(limit=200):
+        if submission.created_utc <= most_recent_utc:
+            print("Reached already-processed posts. Daily sync complete.")
+            break 
+            
         process_submission(submission)
