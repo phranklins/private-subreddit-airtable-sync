@@ -40,6 +40,7 @@ REDDIT_CLIENT_SECRET = os.environ.get("REDDIT_CLIENT_SECRET")
 REDDIT_PASSWORD = os.environ.get("REDDIT_PASSWORD")
 REDDIT_USERNAME = os.environ.get("REDDIT_USERNAME")
 REDDIT_USER_AGENT = os.environ.get("REDDIT_USER_AGENT")
+REDDIT_SUBREDDIT = os.environ.get("REDDIT_SUBREDDIT")
 
 AIRTABLE_API_KEY = os.environ.get("AIRTABLE_API_KEY")
 AIRTABLE_BASE_ID = os.environ.get("AIRTABLE_BASE_ID")
@@ -202,7 +203,7 @@ def load_reddit():
         print("Reddit auth failed:", repr(e))
         raise
     print("Loading subreddit...")
-    subreddit = reddit.subreddit("luxelife")
+    subreddit = reddit.subreddit(REDDIT_SUBREDDIT)
     print("Subreddit loaded.")
     return reddit, subreddit
 
@@ -664,7 +665,7 @@ def get_reddit_post(submission):
     print(reply_table_str)
 
     text_reply = (
-      f"👋🏾 Hello, LuxeLife Bot here! This is a summary of your post. If this info looks incorrect or missing anything, please [update your submission via this form]({prefill}). \n\n *Please send mod mail if you encounter problems with this bot.* \n\n \n"
+      f"👋🏾 Hello, your Review Bot here! This is a summary of your post. If this info looks incorrect or missing anything, please [update your submission via this form]({prefill}). \n\n *Please send mod mail if you encounter problems with this bot.* \n\n \n"
       + reply_table_str
     )
 
