@@ -66,6 +66,7 @@ REDDIT_CLIENT_SECRET=your_client_secret
 REDDIT_USERNAME=your_bot_username
 REDDIT_PASSWORD=your_bot_password
 REDDIT_USER_AGENT=your_user_agent
+REDDIT_SUBREDDIT=your_subreddit_name
 
 # Airtable API
 AIRTABLE_API_KEY=your_api_key
