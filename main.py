@@ -10,8 +10,23 @@ import pandas as pd  # Easily work with tabular data
 import html # for grabbing Reddit images
 import mimetypes # for file uploads
 import traceback # for debugging
+import tempfile # for mega downloads
+import shutil # for mega cleanup
 from urllib.parse import urlparse, quote_plus
 from dotenv import load_dotenv
+
+# NEW DEPENDENCIES: pip install beautifulsoup4 mega.py
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    BeautifulSoup = None
+    print("Warning: beautifulsoup4 not installed. ibb.co albums won't be fully parsed.")
+
+try:
+    from mega import Mega
+except ImportError:
+    Mega = None
+    print("Warning: mega.py not installed. mega.nz links won't be downloaded.")
 
 ######################################################
 ######## ENVIRONMENT
@@ -299,6 +314,100 @@ def parse_review_body(post_body):
 
     return regex_data
 
+### PARSE MEGA.NZ IMAGES ###
+
+def parse_mega_images(post_body, submission_id=None):
+    mega_images = []
+    if not post_body or not Mega:
+        return mega_images
+        
+    mega_links = re.findall(r"https://mega\.nz/(?:file|folder)/[a-zA-Z0-9_-]+#[a-zA-Z0-9_-]+", post_body)
+    if not mega_links:
+        return mega_images
+
+    mega_api = Mega()
+    try:
+        m = mega_api.login()
+    except Exception as e:
+        print(f"Failed to login to Mega: {e}")
+        return mega_images
+
+    # Create temporary directory to safely store and stream the decrypted file to Airtable
+    temp_dir = tempfile.mkdtemp()
+
+    try:
+        for link in mega_links[:3]: # Limit to prevent overwhelming downloads
+            try:
+                downloaded_path = m.download_url(link, dest_path=temp_dir)
+                if downloaded_path:
+                    # Convert pathlib object to a standard string for compatibility
+                    downloaded_path = str(downloaded_path)
+                    
+                    if os.path.exists(downloaded_path):
+                        if os.path.isfile(downloaded_path): # Individual File
+                            if downloaded_path.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                                filename = os.path.basename(downloaded_path)
+                                with open(downloaded_path, 'rb') as f:
+                                    mega_images.append({"id": f"mega_{filename}", "content": f.read(), "filename": filename})
+                                    
+                        elif os.path.isdir(downloaded_path): # Full Folder
+                            for root, _, files in os.walk(downloaded_path):
+                                for file in files:
+                                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                                        full_path = os.path.join(root, file)
+                                        with open(full_path, 'rb') as f:
+                                            mega_images.append({"id": f"mega_{file}", "content": f.read(), "filename": file})
+                                            if len(mega_images) >= 10: 
+                                                break
+                                if len(mega_images) >= 10:
+                                    break
+            except Exception as e:
+                print(f"Failed to process Mega link {link} for submission {submission_id}: {e}")
+    finally:
+        # Wipe the decrypted temp storage after saving bytes to memory
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+    return mega_images
+
+### PARSE IBB.CO IMAGES ###
+
+def parse_ibb_images(post_body, submission_id=None):
+    ibb_images = []
+    if not post_body or not BeautifulSoup:
+        return ibb_images
+
+    album_links = re.findall(r"https://ibb\.co/album/[a-zA-Z0-9]+", post_body)
+    single_links = re.findall(r"https://ibb\.co/(?!album/)[a-zA-Z0-9]+", post_body)
+
+    for album_url in album_links:
+        try:
+            res = requests.get(album_url, timeout=10)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                # Grab all images linked in the album
+                for a in soup.find_all('a', href=re.compile(r"https://ibb\.co/(?!album/)[a-zA-Z0-9]+")):
+                    single_links.append(a['href'])
+        except Exception as e:
+            print(f"Failed to fetch IBB album {album_url}: {e}")
+
+    # Remove duplicates
+    single_links = list(set(single_links))
+
+    for link in single_links[:10]:
+        try:
+            res = requests.get(link, timeout=10)
+            if res.status_code == 200:
+                soup = BeautifulSoup(res.text, 'html.parser')
+                meta = soup.find('meta', property='og:image') or soup.find('link', rel='image_src')
+                if meta:
+                    raw_url = meta.get('content') or meta.get('href')
+                    img_id = link.split('/')[-1]
+                    ibb_images.append({"id": f"ibb_{img_id}", "link": raw_url})
+        except Exception as e:
+            print(f"Failed to fetch IBB image {link}: {e}")
+
+    return ibb_images
+
 ### PARSE IMGUR ALBUM INTO INDIVIDUAL IMAGE LINKS ###
 
 def parse_imgur_album(post_body, submission_id=None):
@@ -355,37 +464,54 @@ def upload_attachments(record_id, images, submission_id=None):
     if not images:
         return
     
-    print(f"[{submission_id}] Downloading {len(images)} images to push directly to Airtable...")
+    print(f"[{submission_id}] Processing {len(images)} images to push directly to Airtable...")
 
-    # If pyairtable supports upload_attachment, use it to upload binary content 
     if hasattr(reviews_table, "upload_attachment"):
         for image in images:
-            link = image.get("link")
-            if not link:
-                continue
             try:
-                print(f"Uploading {link} for submission {submission_id}")
-
-                image_response = imgur_cdn.get(link, timeout=30)
-                if image_response.status_code == 200:
-                    content_type = image_response.headers.get("Content-Type", "image/jpeg")
-                    extension = mimetypes.guess_extension(content_type) or ".jpg"
-                    filename = f"{image.get('id')}{extension}"
-
+                # If image content is already downloaded (e.g. Mega)
+                if image.get("content"):
+                    filename = image.get("filename", f"{image.get('id')}.jpg")
+                    content_type = mimetypes.guess_type(filename)[0] or "image/jpeg"
+                    
                     reviews_table.upload_attachment(
                         record_id,
                         FIELD_ATTACHMENT,
                         filename,
-                        content=image_response.content,
+                        content=image.get("content"),
                         content_type=content_type,
                     )
-                    print(f"✓ Uploaded {filename} to record {record_id}")
+                    print(f"✓ Uploaded {filename} to record {record_id} via content bytes")
+
+                # If image is a remote URL to be downloaded
                 else:
-                    print(f"Failed to download image for submission {submission_id}: HTTP {image_response.status_code}")
+                    link = image.get("link")
+                    if not link:
+                        continue
+                        
+                    print(f"Uploading {link} for submission {submission_id}")
+
+                    image_response = imgur_cdn.get(link, timeout=30)
+                    if image_response.status_code == 200:
+                        content_type = image_response.headers.get("Content-Type", "image/jpeg")
+                        extension = mimetypes.guess_extension(content_type) or ".jpg"
+                        filename = f"{image.get('id')}{extension}"
+
+                        reviews_table.upload_attachment(
+                            record_id,
+                            FIELD_ATTACHMENT,
+                            filename,
+                            content=image_response.content,
+                            content_type=content_type,
+                        )
+                        print(f"✓ Uploaded {filename} to record {record_id}")
+                    else:
+                        print(f"Failed to download image for submission {submission_id}: HTTP {image_response.status_code}")
                     
             except Exception as e:
                 print(f"Failed to upload attachment for record {record_id}, submission {submission_id}: {repr(e)}")
-    else: # Fallback: attach remote URLs via an update (Airtable accepts attachments as objects with url)
+    else: 
+        # Fallback: attach remote URLs via an update (Will not work for Mega images passed via local content bytes)
         try:
             attachments = []
             for image in images:
@@ -397,6 +523,7 @@ def upload_attachments(record_id, images, submission_id=None):
                 print(f"✓ Attached {len(attachments)} URLs to record {record_id} (fallback)")
         except Exception as e:
             print(f"Failed to attach URLs for record {record_id}, submission {submission_id}: {repr(e)}")
+
 
 ### CREATE AIRTABLE RECORD ###
 
@@ -506,20 +633,26 @@ def get_reddit_post(submission):
 
     # PARSE POST BODY WITH REGEX
     regex_data = parse_review_body(submission.selftext)
-    imgur_images = parse_imgur_album(submission.selftext, submission.id)
+    
+    # We pass an empty list for imgur_images initially to the record builder
+    # since we upload them via the dedicated pyairtable attachment method below
     new_record = build_airtable_record(submission, regex_data, title_data, [])
 
     # Push new record text to Airtable
     record = reviews_table.create(new_record, typecast=True)
     record_id = record["id"]
+    
     # Immediately add to local state to prevent future duplicates on this run
     existing_ids.add(submission.id)
     print(f"[{submission.id}] Base text record created in Airtable.")
 
-    # Extract images from both Imgur and Native Reddit
-    imgur_images = parse_imgur_album(submission.selftext, submission.id)
+    # Extract images from all supported sources
     reddit_images = parse_reddit_images(submission)
-    all_images = (reddit_images + imgur_images)[:10]
+    imgur_images = parse_imgur_album(submission.selftext, submission.id)
+    ibb_images = parse_ibb_images(submission.selftext, submission.id)
+    mega_images = parse_mega_images(submission.selftext, submission.id)
+    
+    all_images = (reddit_images + imgur_images + ibb_images + mega_images)[:10]
     
     if all_images:
         upload_attachments(record_id, all_images, submission.id)
