@@ -50,11 +50,11 @@ IMGUR_CLIENT_ID = os.environ.get("IMGUR_CLIENT_ID")
 IMGUR_CLIENT_SECRET = os.environ.get("IMGUR_CLIENT_SECRET")
 IMGUR_USER_AGENT = os.environ.get("IMGUR_USER_AGENT")
 
-ENABLE_POST_REPLIES = os.environ.get("ENABLE_POST_REPLIES", "true").lower() in (
-    "true",
-    "1",
-    "yes",
-)
+_replies_env = os.environ.get("ENABLE_POST_REPLIES", "true")
+# If it exists but is blank, force it to "true"
+if not _replies_env.strip():
+    _replies_env = "true"
+ENABLE_POST_REPLIES = _replies_env.lower() in ("true", "1", "yes")
 
 # If set, script runs in Backfill mode. If missing/empty, runs in Daily Cron mode.
 LOOKBACK_DAYS = os.environ.get("REVIEW_LOOKBACK_DAYS")
