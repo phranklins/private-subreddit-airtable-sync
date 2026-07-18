@@ -10,7 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     
     permissions:
-      contents: write # Grant GitHub Actions permission to push the keepalive commit
+      actions: write
+      contents: read
       
     steps:
       - name: Checkout repo
@@ -49,6 +50,14 @@ jobs:
           # Run the main script
           python main.py
 
-      # Keepalive action to check last commit time and automatically pushes an empty, silent dummy commit to your repository before the 60 days inactivity expiration.
+      # Keepalive action via API
       - name: Keep GitHub Actions Alive
-        uses: gautamkrishnar/keepalive-workflow@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Pinging GitHub API to reset the 60-day inactivity timer..."
+          gh api \
+            --method PUT \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            /repos/${{ github.repository }}/actions/workflows/daily-post-sync.yml/enable
