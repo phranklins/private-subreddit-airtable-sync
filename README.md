@@ -1,6 +1,6 @@
-# Reddit Review Bot
+# Sync Private Reddit Posts to Airtable
 
-An automated bot that monitors a private subreddit for flaired review posts, extracts structured review data, and organizes it into an Airtable database.
+A script that monitors a private subreddit for flaired review posts, extracts structured review data, and organizes it into an Airtable database.
 
 ## Overview
 
@@ -49,8 +49,8 @@ This bot monitors a specified private subreddit for posts with a "Review" flair,
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/phranklins/luxe-life-bot.git
-cd luxe-life-bot
+git clone https://github.com/phranklins/private-subreddit-airtable-sync.git
+cd private-subreddit-airtable-sync
 ```
 
 2. Install dependencies:
@@ -162,6 +162,7 @@ This scans and deduplicates all posts from the last 30 days, useful for initial 
 | `REDDIT_USERNAME` | Yes | - | Bot Reddit username |
 | `REDDIT_PASSWORD` | Yes | - | Bot Reddit password |
 | `REDDIT_USER_AGENT` | Yes | - | Bot user agent string |
+| `REDDIT_SUBREDDIT` | Yes | - | Your Subreddit Name |
 | `AIRTABLE_API_KEY` | Yes | - | Airtable personal access token |
 | `AIRTABLE_BASE_ID` | Yes | - | Airtable base ID |
 | `AIRTABLE_REVIEWS_TABLE` | Yes | - | Name of reviews table |
